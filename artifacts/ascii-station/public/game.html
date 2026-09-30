@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ASCII 3D Map Engine</title>
+<title>Leviathan: ASCII Station</title>
 <style>
 :root{
   --bg:#050706;--panel:#0b100c;--line:#1d3b23;--green:#73ff8a;
@@ -33,6 +33,19 @@ button:hover{background:#14291a;color:#fff}
 #log{height:120px;overflow:auto;border:1px solid var(--line);padding:7px;background:#030503;font-size:11px;white-space:pre-wrap}
 kbd{border:1px solid #315d38;background:#0a140c;padding:1px 5px;color:#fff}
 .ok{color:var(--green)}.warn{color:var(--yellow)}.danger{color:var(--red)}
+#alarmStatus{position:absolute;top:39px;left:50%;transform:translateX(-50%);color:#ff966c;
+ font-size:11px;letter-spacing:.12em;background:rgba(28,8,8,.74);border:1px solid #78392e;padding:3px 9px;
+ animation:alarmPulse 2.8s infinite;white-space:nowrap}
+@keyframes alarmPulse{0%,68%,100%{opacity:.55}72%,76%,84%{opacity:1}80%{opacity:.24}}
+@media(max-width:900px){
+ body{overflow:auto}
+ #app{height:100dvh;min-height:620px;display:flex;flex-direction:column;overflow:auto}
+ #gameWrap{flex:1;min-height:390px}
+ #panel{flex:none;max-height:270px}
+ #status{gap:8px;flex-wrap:wrap;font-size:11px}
+ #coords{display:none}
+ textarea{height:160px}
+}
 </style>
 </head>
 <body>
@@ -42,13 +55,14 @@ kbd{border:1px solid #315d38;background:#0a140c;padding:1px 5px;color:#fff}
     <div id="hud">
       <div id="status"><span id="mode">EXPLORATION</span><span id="stats">HP 100 · AMMO 24</span><span id="coords"></span></div>
     </div>
+    <div id="alarmStatus" aria-label="Station warning">!! HULL PRESSURE UNSTABLE !!</div>
     <div id="crosshair">+</div>
     <div id="message"></div>
   </div>
 
   <aside id="panel">
-    <h1>ASCII 3D MAP ENGINE</h1>
-    <div class="small">HTML5 Canvas + vanilla JavaScript raycaster</div>
+    <h1>LEVIATHAN // DECK 04</h1>
+    <div class="small">ASCII raycaster · abandoned vessel</div>
 
     <h2>CONTROLS</h2>
     <p>
@@ -56,6 +70,8 @@ kbd{border:1px solid #315d38;background:#0a140c;padding:1px 5px;color:#fff}
       <kbd>E</kbd> interact · <kbd>SPACE</kbd> draw/holster weapon ·
       <kbd>ENTER</kbd> or mouse click fire in combat.
     </p>
+    <button id="soundToggle" type="button" aria-pressed="true">SOUND: ON</button>
+    <span class="small">Audio starts after a key or click.</span>
 
     <h2>MAP JSON</h2>
     <textarea id="jsonEditor" spellcheck="false"></textarea>
@@ -89,7 +105,7 @@ kbd{border:1px solid #315d38;background:#0a140c;padding:1px 5px;color:#fff}
    ============================================================ */
 
 const DEFAULT_MAP = {
-  "name":"Leviathan Test Deck",
+  "name":"The Nostradamus Test Deck",
   "tileSize":1,
   "map":[
     "############################",
@@ -150,6 +166,8 @@ const statsEl = document.getElementById("stats");
 const coordsEl = document.getElementById("coords");
 const messageEl = document.getElementById("message");
 const crosshair = document.getElementById("crosshair");
+const soundToggle = document.getElementById("soundToggle");
+const alarmStatus = document.getElementById("alarmStatus");
 
 let world = structuredClone(DEFAULT_MAP);
 let keys = {};
@@ -157,7 +175,27 @@ let lastTime = performance.now();
 let messageTimer = 0;
 let dialogueIndex = {};
 let flash = 0;
+let incomingFlash = 0;
 let shake = 0;
+let worldTime = 0;
+let footstepTimer = 0;
+let walkPhase = 0;
+let recoil = 0;
+let shotTrace = null;
+let enemyTrace = null;
+let particles = [];
+let audioContext = null;
+let soundEnabled = true;
+
+const emergencyLights = [
+  {x:6.5,y:2.5,color:[96,210,146],range:4.8,power:.38},
+  {x:20.5,y:5.5,color:[255,94,48],range:5.2,power:.46},
+  {x:16.5,y:9.5,color:[255,164,74],range:4.1,power:.32}
+];
+const warningPanels = [
+  {x:13,y:2,label:"HULL / PRESSURE"},
+  {x:18,y:6,label:"DECK / CAUTION"}
+];
 
 const player = {
   x:3.5,y:2.5,angle:0,
@@ -174,6 +212,113 @@ const camera = {
 };
 
 function clone(v){ return JSON.parse(JSON.stringify(v)); }
+
+function getAudioContext(){
+  if(!soundEnabled)return null;
+  if(!audioContext){
+    const AudioContextClass=window.AudioContext||window.webkitAudioContext;
+    if(!AudioContextClass){
+      soundEnabled=false;
+      soundToggle.textContent="SOUND: UNAVAILABLE";
+      soundToggle.setAttribute("aria-pressed","false");
+      return null;
+    }
+    audioContext=new AudioContextClass();
+  }
+  if(audioContext.state==="suspended")audioContext.resume().catch(()=>{});
+  return audioContext;
+}
+
+function playTone(startHz,endHz,duration,volume,wave="sine",delay=0){
+  const audio=getAudioContext();
+  if(!audio)return;
+  const now=audio.currentTime+delay;
+  const oscillator=audio.createOscillator();
+  const gain=audio.createGain();
+  oscillator.type=wave;
+  oscillator.frequency.setValueAtTime(startHz,now);
+  oscillator.frequency.exponentialRampToValueAtTime(Math.max(1,endHz),now+duration);
+  gain.gain.setValueAtTime(.0001,now);
+  gain.gain.linearRampToValueAtTime(volume,now+.008);
+  gain.gain.exponentialRampToValueAtTime(.0001,now+duration);
+  oscillator.connect(gain);
+  gain.connect(audio.destination);
+  oscillator.start(now);
+  oscillator.stop(now+duration+.015);
+}
+
+function playNoise(duration,volume,cutoff=900){
+  const audio=getAudioContext();
+  if(!audio)return;
+  const length=Math.max(1,Math.floor(audio.sampleRate*duration));
+  const buffer=audio.createBuffer(1,length,audio.sampleRate);
+  const data=buffer.getChannelData(0);
+  for(let i=0;i<length;i++)data[i]=(Math.random()*2-1)*(1-i/length);
+  const source=audio.createBufferSource();
+  const filter=audio.createBiquadFilter();
+  const gain=audio.createGain();
+  source.buffer=buffer;
+  filter.type="lowpass";
+  filter.frequency.setValueAtTime(cutoff,audio.currentTime);
+  filter.frequency.exponentialRampToValueAtTime(Math.max(100,cutoff*.35),audio.currentTime+duration);
+  gain.gain.setValueAtTime(volume,audio.currentTime);
+  gain.gain.exponentialRampToValueAtTime(.0001,audio.currentTime+duration);
+  source.connect(filter);
+  filter.connect(gain);
+  gain.connect(audio.destination);
+  source.start();
+  source.stop(audio.currentTime+duration+.01);
+}
+
+function playSound(kind){
+  if(!soundEnabled)return;
+  if(kind==="shot"){
+    playTone(175,42,.17,.105,"sawtooth");
+    playNoise(.13,.075,1800);
+  }else if(kind==="enemy"){
+    playTone(420,90,.22,.055,"square");
+    playNoise(.12,.035,1250);
+  }else if(kind==="talk"){
+    playTone(290,210,.08,.018,"triangle");
+    playTone(390,250,.09,.014,"triangle",.075);
+  }else if(kind==="step"){
+    playNoise(.045,.012,430);
+    playTone(72,48,.06,.006,"sine");
+  }else if(kind==="hit"){
+    playTone(155,62,.15,.045,"sawtooth");
+  }
+}
+
+function sampleLight(x,y){
+  let r=0,g=0,b=0;
+  for(let i=0;i<emergencyLights.length;i++){
+    const light=emergencyLights[i];
+    const dx=x-light.x,dy=y-light.y;
+    const falloff=Math.max(0,1-(dx*dx+dy*dy)/(light.range*light.range));
+    if(!falloff)continue;
+    const pulse=.72+.19*Math.sin(worldTime*2.7+i*2.1)+
+      (Math.sin(worldTime*17+i*4.7)>.965?.13:0);
+    const amount=falloff*falloff*light.power*pulse;
+    r+=light.color[0]*amount;
+    g+=light.color[1]*amount;
+    b+=light.color[2]*amount;
+  }
+  const dx=x-player.x,dy=y-player.y;
+  const forward=dx*Math.cos(player.angle)+dy*Math.sin(player.angle);
+  const lateral=Math.abs(-dx*Math.sin(player.angle)+dy*Math.cos(player.angle));
+  if(forward>0&&forward<7&&lateral<forward*.58+.35){
+    const cone=Math.max(0,1-lateral/(forward*.58+.35));
+    const reach=1-forward/7;
+    const amount=cone*reach*.22;
+    r+=143*amount;g+=197*amount;b+=210*amount;
+  }
+  return [r,g,b];
+}
+
+function litColor(base,shade,x,y){
+  const light=sampleLight(x,y);
+  return `rgb(${Math.min(255,Math.round(base[0]*shade+light[0]))},${Math.min(255,Math.round(base[1]*shade+light[1]))},${Math.min(255,Math.round(base[2]*shade+light[2]))})`;
+}
 
 function log(text, cls=""){
   const line=document.createElement("div");
@@ -261,6 +406,7 @@ function interact(){
     showMessage(lines[i%lines.length],4200);
     dialogueIndex[npc.id]=i+1;
     log(npc.name+": "+lines[i%lines.length]);
+    playSound("talk");
     return;
   }
 
@@ -290,6 +436,38 @@ function toggleWeapon(){
   log(player.weapon?"Weapon drawn.":"Weapon holstered.");
 }
 
+function spawnBlood(target){
+  for(let i=0;i<18;i++){
+    const angle=Math.random()*Math.PI*2;
+    const speed=.35+Math.random()*1.2;
+    particles.push({
+      x:target.x,y:target.y,z:.78+Math.random()*.55,
+      vx:Math.cos(angle)*speed,vy:Math.sin(angle)*speed,
+      vz:.25+Math.random()*1.05,life:.34+Math.random()*.36,
+      maxLife:.7,size:1.3+Math.random()*1.8
+    });
+  }
+}
+
+function findRaycastTarget(){
+  const dirX=Math.cos(player.angle),dirY=Math.sin(player.angle);
+  const wallDistance=castRay(player.angle).distance;
+  let target=null;
+  let nearest=Math.min(12,wallDistance);
+  for(const n of (world.npcs||[])){
+    if(n.dead||!n.hostile)continue;
+    const dx=n.x-player.x,dy=n.y-player.y;
+    const along=dx*dirX+dy*dirY;
+    const across=Math.abs(dx*dirY-dy*dirX);
+    const radius=n.id==="creature"?.38:.3;
+    if(along<=.1||along>=nearest||across>radius)continue;
+    if(!lineClear(player.x,player.y,n.x,n.y))continue;
+    target=n;
+    nearest=along;
+  }
+  return {target,distance:target?nearest:Math.min(12,wallDistance)};
+}
+
 function shoot(){
   if(!player.weapon)return;
   if(player.ammo<=0){
@@ -298,24 +476,18 @@ function shoot(){
     return;
   }
   player.ammo--;
-  flash=.09;
+  flash=.1;
   shake=.08;
-
-  let target=null, best=0.16;
-  for(const n of (world.npcs||[])){
-    if(n.dead || !n.hostile)continue;
-    const dx=n.x-player.x,dy=n.y-player.y;
-    const d=Math.hypot(dx,dy);
-    if(d>12)continue;
-    const a=normaliseAngle(Math.atan2(dy,dx)-player.angle);
-    const tolerance=Math.max(.045,best/d);
-    if(Math.abs(a)<tolerance && lineClear(player.x,player.y,n.x,n.y)){
-      if(Math.abs(a)<best){best=Math.abs(a);target=n;}
-    }
-  }
+  recoil=.16;
+  playSound("shot");
+  const rayHit=findRaycastTarget();
+  const target=rayHit.target;
+  shotTrace={life:.2,duration:.2,distance:rayHit.distance,hit:!!target};
 
   if(target){
     target.hp=(target.hp??1)-1;
+    spawnBlood(target);
+    playSound("hit");
     log("Hit "+target.name+" ("+target.hp+" HP) · "+player.ammo+" rounds left");
     showMessage(target.hp>0?"TARGET HIT":"TARGET DOWN");
     if(target.hp<=0){
@@ -383,7 +555,7 @@ function castRay(angle){
 
 const wallChars=" .:-=+*#%@";
 const shadeChars=" .,'`^:;Il!i~+_-?][}{1)(|/\\tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
-const wallPalette=[[61,67,70],[70,65,57],[76,62,49],[55,61,64],[73,68,59],[64,57,51]];
+const wallPalette=[[82,91,94],[91,82,70],[101,78,61],[74,83,87],[96,89,73],[87,73,65]];
 
 function drawFloor(){
   const W=canvas.width,H=canvas.height;
@@ -407,7 +579,44 @@ function drawFloor(){
       const gridEdge=edgeX<.035||edgeY<.035;
       const brightness=Math.max(.25,Math.min(.88,.92/(1+rowDistance*.12)));
       const shade=gridEdge ? .43 : brightness;
-      ctx.fillStyle=`rgb(${Math.round(tile[0]*shade)},${Math.round(tile[1]*shade)},${Math.round(tile[2]*shade)})`;
+      ctx.fillStyle=litColor(tile,shade,worldX,worldY);
+      ctx.fillRect(x,y,Math.min(stepX,W-x),bandH);
+    }
+  }
+}
+
+function drawCeiling(){
+  const W=canvas.width,H=canvas.height;
+  const palette=[[39,43,48],[45,49,53],[34,39,44],[49,51,54],[38,42,47]];
+  const stepX=8,stepY=4;
+  const focal=H/.82;
+  for(let y=0;y<Math.floor(H/2)-1;y+=stepY){
+    const rowDistance=(focal*.5)/(H/2-(y+stepY*.5));
+    const bandH=Math.min(stepY,Math.floor(H/2)-y);
+    for(let x=0;x<W;x+=stepX){
+      const cameraX=2*(x+stepX*.5)/W-1;
+      const rayAngle=player.angle+Math.atan(cameraX*Math.tan(camera.fov/2));
+      const rayDistance=rowDistance/Math.cos(rayAngle-player.angle);
+      const worldX=player.x+Math.cos(rayAngle)*rayDistance;
+      const worldY=player.y+Math.sin(rayAngle)*rayDistance;
+      const cellX=Math.floor(worldX),cellY=Math.floor(worldY);
+      const seed=Math.abs((cellX*73856093)^(cellY*19349663));
+      let tile=palette[seed%palette.length];
+      const edgeX=Math.min(worldX-cellX,1-(worldX-cellX));
+      const edgeY=Math.min(worldY-cellY,1-(worldY-cellY));
+      const gridEdge=edgeX<.035||edgeY<.035;
+      let brightness=Math.max(.3,Math.min(.78,.82/(1+rowDistance*.1)));
+      if(gridEdge)brightness*=.54;
+      const fixture=emergencyLights.find(light=>
+        Math.floor(light.x)===cellX&&Math.floor(light.y)===cellY&&
+        Math.abs(worldX-light.x)<.34&&Math.abs(worldY-light.y)<.11
+      );
+      if(fixture){
+        const pulse=.75+.2*Math.sin(worldTime*3.1+cellX);
+        tile=fixture.color.map(value=>Math.min(255,value*1.15));
+        brightness=pulse;
+      }
+      ctx.fillStyle=litColor(tile,brightness,worldX,worldY);
       ctx.fillRect(x,y,Math.min(stepX,W-x),bandH);
     }
   }
@@ -418,16 +627,8 @@ function drawScene(){
   ctx.fillStyle="#000";
   ctx.fillRect(0,0,W,H);
 
-  /* Ceiling / floor as ASCII texture bands */
-  ctx.font="12px Consolas,monospace";
-  ctx.textBaseline="top";
-
-  for(let y=0;y<H/2;y+=12){
-    const p=y/(H/2);
-    ctx.fillStyle=`rgba(40,90,45,${0.03+p*.06})`;
-    ctx.fillText(p<.5?"·":"`",8,y);
-    ctx.fillText(p<.5?"·":"`",W-18,y);
-  }
+  /* Cool grey ceiling and original green deck use matching perspective grids. */
+  drawCeiling();
   drawFloor();
 
   const cols=Math.min(240,Math.floor(W/4));
@@ -449,26 +650,32 @@ function drawScene(){
     const ch=chars[idx];
     const tileSeed=Math.abs((ray.mapX*73856093)^(ray.mapY*19349663));
     const material=wallPalette[tileSeed%wallPalette.length];
-    const depthLight=Math.max(.24,1-corrected/camera.maxDistance*.7);
-    const sideLight=ray.side===1 ? .72 : 1;
-    const grainLight=(ray.wallX<.035||ray.wallX>.965) ? .58 : 1;
+    const depthLight=Math.max(.32,1-corrected/camera.maxDistance*.58);
+    const sideLight=ray.side===1 ? .78 : 1;
+    const grainLight=(ray.wallX<.045||ray.wallX>.955) ? .62 : 1;
     const wallX=x*colW;
-    ctx.fillStyle=`rgb(${Math.round(material[0]*depthLight*sideLight*grainLight)},${Math.round(material[1]*depthLight*sideLight*grainLight)},${Math.round(material[2]*depthLight*sideLight*grainLight)})`;
+    const hitWorldX=player.x+Math.cos(rayAngle)*ray.distance;
+    const hitWorldY=player.y+Math.sin(rayAngle)*ray.distance;
+    ctx.fillStyle=litColor(material,depthLight*sideLight*grainLight,hitWorldX,hitWorldY);
     ctx.fillRect(wallX,top,colW+1,wallH);
 
-    /* Dark plate joins and warm oxidised scratches break up the metal. */
-    ctx.fillStyle=`rgba(5,8,10,${.32*depthLight})`;
-    ctx.fillRect(wallX,top+wallH*.08,colW+1,Math.max(2,wallH*.018));
-    ctx.fillRect(wallX,top+wallH*.92,colW+1,Math.max(2,wallH*.018));
+    /* Clear steel plates: heavy horizontal joins, upright rails, and rust flecks. */
+    ctx.fillStyle=`rgba(5,8,10,${.5*depthLight})`;
+    ctx.fillRect(wallX,top+wallH*.08,colW+1,Math.max(2,wallH*.026));
+    ctx.fillRect(wallX,top+wallH*.92,colW+1,Math.max(2,wallH*.026));
+    if(ray.wallX<.055||ray.wallX>.945){
+      ctx.fillStyle=`rgba(184,190,182,${.18*depthLight})`;
+      ctx.fillRect(wallX,top,colW+1,wallH);
+    }
     const uBand=Math.floor(ray.wallX*16);
-    const grimeStep=Math.max(14,wallH/30);
+    const grimeStep=Math.max(12,wallH/26);
     for(let y=top;y<top+wallH;y+=grimeStep){
       const vBand=Math.floor((y-top)/wallH*18);
       const grime=Math.abs((ray.mapX*73856093)^(ray.mapY*19349663)^(uBand*83492791)^(vBand*297121507));
       if(grime%19<2){
         ctx.fillStyle=grime%5===0
-          ?`rgba(157,91,49,${.34*depthLight})`
-          :`rgba(7,10,12,${.3*depthLight})`;
+          ?`rgba(185,104,54,${.48*depthLight})`
+          :`rgba(7,10,12,${.4*depthLight})`;
         ctx.fillRect(wallX,y,colW+1,Math.min(grimeStep,top+wallH-y));
       }
     }
@@ -481,9 +688,32 @@ function drawScene(){
     for(let y=top;y<top+wallH;y+=glyphH){
       ctx.fillText(ch,wallX,y);
     }
+
+    const warning=warningPanels.find(panel=>panel.x===ray.mapX&&panel.y===ray.mapY);
+    if(warning&&ray.wallX>.2&&ray.wallX<.8){
+      const panelTop=top+wallH*.31,panelHeight=wallH*.4;
+      const pulse=.42+.48*Math.abs(Math.sin(worldTime*4.1));
+      ctx.fillStyle=`rgba(13,17,18,.96)`;
+      ctx.fillRect(wallX,panelTop,colW+1,panelHeight);
+      ctx.fillStyle=`rgba(220,59,43,${pulse})`;
+      ctx.fillRect(wallX,panelTop,colW+1,Math.max(2,panelHeight*.13));
+      ctx.fillStyle=`rgba(244,166,94,${.55+pulse*.3})`;
+      ctx.fillRect(wallX,panelTop+panelHeight*.82,colW+1,Math.max(2,panelHeight*.08));
+      if(Math.abs(ray.wallX-.5)<.035){
+        ctx.save();
+        ctx.textAlign="center";
+        ctx.font=`bold ${Math.max(7,Math.min(12,wallH/11))}px Consolas,monospace`;
+        ctx.fillStyle=`rgba(255,218,174,${pulse})`;
+        ctx.fillText(warning.label,wallX+colW/2,panelTop+panelHeight*.62,Math.max(34,wallH*.72));
+        ctx.restore();
+      }
+    }
   }
 
   drawSprites(zBuffer,cols,colW);
+  drawParticles(zBuffer,cols);
+  drawEnemyTrace();
+  drawLaserTrace();
   drawWeapon();
 
   if(flash>0){
