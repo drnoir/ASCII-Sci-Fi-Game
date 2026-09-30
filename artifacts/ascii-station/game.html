@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Leviathan / Local Navigation Feed</title>
+  <style>
+    :root{color-scheme:dark;--bg:#050706;--panel:#0b100c;--line:#1d3b23;--green:#73ff8a;--dim:#4ca85b;--text:#b8ffc1;--red:#ff6868;--yellow:#e6df76}
+    *{box-sizing:border-box}
+    html,body{width:100%;height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--text);font:12px/1.4 "Courier New",monospace}
+    #app{height:100%;display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:8px;padding:8px}
+    #gameWrap{position:relative;min-width:0;min-height:0;overflow:hidden;border:1px solid var(--line);background:#000}
+    canvas{display:block;width:100%;height:100%;image-rendering:pixelated;cursor:crosshair}
+    #hud{position:absolute;inset:11px 13px auto;display:flex;justify-content:space-between;gap:12px;color:var(--green);text-shadow:0 0 8px #000;pointer-events:none;font-size:12px}
+    #hud span:last-child{text-align:right}
+    #message{position:absolute;left:50%;bottom:30px;display:none;min-width:250px;max-width:80%;transform:translateX(-50%);padding:9px 14px;border:1px solid var(--line);background:rgba(0,10,0,.9);text-align:center}
+    #crosshair{position:absolute;left:50%;top:50%;display:none;transform:translate(-50%,-50%);font-size:18px;color:var(--green)}
+    #panel{overflow:auto;padding:12px;border:1px solid var(--line);background:var(--panel)}
+    h1{margin:0 0 5px;color:var(--green);font-size:17px;letter-spacing:.02em}
+    h2{margin:18px 0 7px;color:var(--green);font-size:11px;letter-spacing:.16em}
+    p{margin:0;color:#8cb893;font-size:11px}
+    .small{color:#547d5c;font-size:10px}
+    .signal{display:inline-block;width:6px;height:6px;margin-right:6px;border-radius:50%;background:var(--green);box-shadow:0 0 7px var(--green)}
+    #log{height:130px;overflow:auto;padding:7px;border:1px solid var(--line);background:#030503;color:#7daa84;font-size:10px;white-space:pre-wrap}
+    kbd{padding:1px 5px;border:1px solid #315d38;background:#0a140c;color:#fff}
+    .ok{color:var(--green)}.warn{color:var(--yellow)}.danger{color:var(--red)}
+    @media(max-width:720px){
+      #app{display:block;padding:0}
+      #gameWrap{height:100%;border:0}
+      #panel{position:absolute;left:10px;right:10px;bottom:10px;max-height:31%;padding:9px;background:rgba(5,12,7,.88);backdrop-filter:blur(4px)}
+      #panel h1,#panel .small,#panel h2:nth-of-type(n+2),#panel #log{display:none}
+      #panel h2{margin:0 0 5px}
+      #panel p{font-size:10px}
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <div id="gameWrap" tabindex="0" aria-label="Playable Leviathan station view">
+    <canvas id="view" width="960" height="600"></canvas>
+    <div id="hud"><span id="mode">EXPLORATION</span><span id="stats">HP 100 · AMMO 24</span><span id="coords"></span></div>
+    <div id="crosshair">+</div>
+    <div id="message"></div>
+  </div>
+  <aside id="panel">
+    <h1><span class="signal"></span>LOCAL NAVIGATION FEED</h1>
+    <div class="small">LEVIATHAN / DECK 04 / SIGNAL 07</div>
+    <h2>FIELD CONTROLS</h2>
+    <p><kbd>WASD</kbd> / <kbd>ARROWS</kbd> move and turn<br><kbd>E</kbd> inspect or open · <kbd>SPACE</kbd> draw weapon<br><kbd>ENTER</kbd> or click fire in combat</p>
+    <h2>EVENT LOG</h2>
+    <div id="log" aria-live="polite"></div>
+    <h2>NOTICE</h2>
+    <p class="small">Hull integrity is not a promise. Find the exit before the lower deck goes quiet.</p>
+  </aside>
+</div>
+<script>
+"use strict";
+const canvas=document.querySelector("#view"),ctx=canvas.getContext("2d");
+const modeEl=document.querySelector("#mode"),statsEl=document.querySelector("#stats"),coordsEl=document.querySelector("#coords"),messageEl=document.querySelector("#message"),crosshair=document.querySelector("#crosshair"),logEl=document.querySelector("#log");
+const map=[
+  "############################",
+  "#............#.............#",
+  "#............#....D........#",
+  "#..######....#....#........#",
+  "#..#....#....#######.......#",
+  "#..#....#..................#",
+  "#..#....######..########..##",
+  "#..#...........D.........+.#",
+  "#..######......###########.#",
+  "#..........................#",
+  "#......D...................#",
+  "#..........................#",
+  "############################"
+];
+const doors=[{x:14.5,y:2.5,open:false},{x:13.5,y:7.5,open:false},{x:7.5,y:10.5,open:false}];
+const entities=[
+  {id:"captain",name:"CAPTAIN",x:20.5,y:5.5,hostile:false,dialogue:["The lower deck has gone silent.","If you hear metal scraping, do not investigate alone.","Find the exit before the lights fail."]},
+  {id:"lifeform",name:"LIFEFORM",x:22.5,y:9.5,hostile:true,hp:3,dialogue:["The creature emits a wet, distorted hiss."]}
+];
+const pickups=[{type:"health",x:8.5,y:1.5,amount:35},{type:"ammo",x:10.5,y:9.5,amount:12},{type:"health",x:19.5,y:10.5,amount:35},{type:"ammo",x:25.5,y:2.5,amount:12}];
+const player={x:3.5,y:2.5,a:0,hp:100,ammo:24,weapon:false};
+const keys={};let last=performance.now(),messageTimer=0,dialogue={},flash=0;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v)),dist=(a,b,c,d)=>Math.hypot(a-c,b-d);
+function log(t,c){const line=document.createElement("div");line.textContent="> "+t;if(c)line.className=c;logEl.prepend(line);while(logEl.children.length>30)logEl.lastChild.remove()}
+function message(t,ms=2200){messageEl.textContent=t;messageEl.style.display="block";messageTimer=ms/1000}
+function doorAt(x,y){return doors.find(d=>Math.floor(d.x)===Math.floor(x)&&Math.floor(d.y)===Math.floor(y))}
+function wall(x,y){const gx=Math.floor(x),gy=Math.floor(y);if(!map[gy]||map[gy][gx]==="#")return true;const d=doorAt(x,y);return !!d&&!d.open}
+function can(x,y){return !wall(x-.18,y-.18)&&!wall(x+.18,y-.18)&&!wall(x-.18,y+.18)&&!wall(x+.18,y+.18)}
+function move(dx,dy){if(can(player.x+dx,player.y))player.x+=dx;if(can(player.x,player.y+dy))player.y+=dy}
+function nearest(list,max){let hit=null,dd=max;for(const item of list){if(item.dead||item.collected)continue;const d=dist(player.x,player.y,item.x,item.y);if(d<dd){hit=item;dd=d}}return hit}
+function interact(){
+  const npc=nearest(entities,2);if(npc){if(npc.hostile&&player.weapon){message("HOSTILE LIFEFORM — FIRE WITH ENTER OR MOUSE");return}const i=dialogue[npc.id]||0;message(npc.dialogue[i%npc.dialogue.length],4000);dialogue[npc.id]=i+1;log(npc.name+": "+npc.dialogue[i%npc.dialogue.length]);return}
+  const d=nearest(doors,1.7);if(d){d.open=!d.open;message(d.open?"DOOR OPEN":"DOOR CLOSED");log(d.open?"Door opened.":"Door closed.");return}
+  if(map[Math.floor(player.y)][Math.floor(player.x)]==="+"){message("EXIT REACHED — MISSION COMPLETE",5000);log("Mission complete.","ok");return}message("Nothing to interact with.")
+}
+function weapon(){player.weapon=!player.weapon;modeEl.textContent=player.weapon?"COMBAT MODE":"EXPLORATION";modeEl.className=player.weapon?"danger":"";crosshair.style.display=player.weapon?"block":"none";message(player.weapon?"WEAPON DRAWN — COMBAT MODE":"WEAPON HOLSTERED")}
+function shoot(){if(!player.weapon)return;if(!player.ammo){message("OUT OF AMMO — FIND AN AMMO PACK");return}player.ammo--;flash=.12;let target=null,best=.14;for(const n of entities){if(n.dead||!n.hostile)continue;const dx=n.x-player.x,dy=n.y-player.y,a=Math.atan2(dy,dx)-player.a,d=Math.hypot(dx,dy);if(d<12&&Math.abs(Math.atan2(Math.sin(a),Math.cos(a)))<best){target=n;best=Math.abs(a)}}if(target){target.hp--;log("Hit "+target.name+" ("+target.hp+" HP) · "+player.ammo+" rounds left");message(target.hp?"TARGET HIT":"TARGET DOWN");if(target.hp<=0){target.dead=true;target.hostile=false;log("LIFEFORM neutralised.","ok")}}else log("Shot missed · "+player.ammo+" rounds left")}
+function ray(a){const dx=Math.cos(a),dy=Math.sin(a);let x=player.x,y=player.y,d=0;for(let i=0;i<180;i++){x+=dx*.08;y+=dy*.08;d+=.08;if(wall(x,y))return d}return 30}
+function render(){const W=canvas.width,H=canvas.height;ctx.fillStyle="#020504";ctx.fillRect(0,0,W,H);ctx.fillStyle="#07130b";ctx.fillRect(0,0,W,H/2);ctx.fillStyle="#0b1b12";ctx.fillRect(0,H/2,W,H/2);const cols=Math.min(240,Math.floor(W/4)),fov=Math.PI/3;for(let x=0;x<cols;x++){const a=player.a-fov/2+fov*(x/cols),d=ray(a)*Math.cos(a-player.a),h=Math.min(H*1.8,H/(d*.82)),top=(H-h)/2,light=clamp(1-d/30,.12,1),ch="#%*+=-:. "[Math.min(8,Math.floor((1-light)*8))];ctx.fillStyle=`rgb(${Math.floor(67*light)},${Math.floor(75*light)},${Math.floor(68*light)})`;ctx.fillRect(x*W/cols,top,W/cols+1,h);ctx.fillStyle=`rgba(192,225,188,${.08+light*.28})`;ctx.font=Math.max(9,Math.min(19,h/7))+"px monospace";for(let y=top;y<top+h;y+=Math.max(10,h/7))ctx.fillText(ch,x*W/cols,y)}
+  for(const e of [...entities,...pickups]){if(e.dead||e.collected)continue;const dx=e.x-player.x,dy=e.y-player.y,ang=Math.atan2(dy,dx)-player.a,aa=Math.atan2(Math.sin(ang),Math.cos(ang)),d=Math.hypot(dx,dy)*Math.cos(aa);if(Math.abs(aa)>fov/2||d<.1)continue;const sx=W/2*(1+Math.tan(aa)/Math.tan(fov/2)),sz=(e.type?18:100)/d;ctx.fillStyle=e.type?(e.type==="health"?"#75ff9b":"#ffd66b"):(e.hostile?"#b7ff70":"#ffd8a8");ctx.font=Math.max(10,sz/5)+"px monospace";ctx.textAlign="center";ctx.fillText(e.type?(e.type==="health"?"[+]":"[A]"):(e.hostile?"LIFEFORM":"CAPTAIN"),sx,H/2+sz/2);ctx.textAlign="left"}
+  if(player.weapon){ctx.fillStyle="#73ff8a";ctx.font="16px monospace";ctx.fillText("      ______",W/2-90,H-78);ctx.fillText(" ____/______\\____====>",W/2-90,H-60)}if(flash){ctx.fillStyle="rgba(220,255,220,.18)";ctx.fillRect(0,0,W,H)}
+}
+function update(now){const dt=Math.min(.05,(now-last)/1000);last=now;if(messageTimer>0&&(messageTimer-=dt)<=0)messageEl.style.display="none";flash=Math.max(0,flash-dt);let f=(keys.w||keys.ArrowUp?1:0)-(keys.s||keys.ArrowDown?1:0),s=(keys.d?1:0)-(keys.a?1:0),turn=(keys.ArrowRight?1:0)-(keys.ArrowLeft?1:0);player.a+=turn*2.3*dt;const speed=2.5*(player.weapon?.65:1),len=Math.hypot(f,s)||1;move((Math.cos(player.a)*f-Math.sin(player.a)*s)/len*speed*dt,(Math.sin(player.a)*f+Math.cos(player.a)*s)/len*speed*dt);for(const i of pickups){if(i.collected||dist(player.x,player.y,i.x,i.y)>.55)continue;if(i.type==="health"&&player.hp<100){player.hp=Math.min(100,player.hp+i.amount);i.collected=true;message("MEDKIT +"+i.amount+" HEALTH");log("Medkit collected.","ok")}if(i.type==="ammo"&&player.ammo<48){player.ammo=Math.min(48,player.ammo+i.amount);i.collected=true;message("AMMO +"+i.amount);log("Ammo collected.","ok")}}statsEl.textContent=`HP ${player.hp} · AMMO ${player.ammo}`;coordsEl.textContent=`X ${player.x.toFixed(1)}  Y ${player.y.toFixed(1)}`;render();requestAnimationFrame(update)}
+function resize(){const r=canvas.getBoundingClientRect(),s=Math.min(devicePixelRatio||1,1.5);canvas.width=Math.max(480,Math.floor(r.width*s));canvas.height=Math.max(320,Math.floor(r.height*s))}
+addEventListener("resize",resize);addEventListener("keydown",e=>{keys[e.key]=true;if([" ","ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.key))e.preventDefault();if(e.repeat)return;if(e.key===" ")weapon();else if(e.key.toLowerCase()==="e")interact();else if(e.key==="Enter"||e.key.toLowerCase()==="f")shoot()});addEventListener("keyup",e=>keys[e.key]=false);canvas.addEventListener("click",()=>{if(player.weapon)shoot()});resize();log("Engine initialised.","ok");log("Navigation feed open.");message("ASCII STATION READY",1700);requestAnimationFrame(update);
+</script>
+</body>
+</html>

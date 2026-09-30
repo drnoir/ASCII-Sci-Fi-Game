@@ -1,0 +1,17 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "BvEo6BPt6MIq5gNocJqF9"
+uri = "file://.local/conversation-workspace/files/attached_assets/ASCII_3D_MAP_ENGINE_1790772646810.html"
+type = "html"
+title = "ASCII 3D Map Engine — Fixed Projection & Grunge Walls"
+description = "Updated standalone game: sprites now scale and anchor to the floor in perspective, with textured gunmetal/rust wall panels and stable pickups."
+logical_id = "846c1d1b-34a3-49a9-b42e-c0c008103a95"
+content_hash = "sha256:ed0aee7ed54002ec885cabfd73592b571560d7f7e37a4bea395d5468318be83d"
+size = 25385
+mtime_ms = 1790773255210
+storage_uri = "gcs://replit-rams-assets-archer/rams/assets/conversation:f4c33647-b23c-497c-b9c2-c73ef092d71d/846c1d1b-34a3-49a9-b42e-c0c008103a95/f9ea4931-fc45-4972-bf61-46ae82bff49b"
+storage_version_token = "1790773284282374"
+content_type = "text/html"
+source_uri = "file://attached_assets/ASCII_3D_MAP_ENGINE_1790772646810.html"

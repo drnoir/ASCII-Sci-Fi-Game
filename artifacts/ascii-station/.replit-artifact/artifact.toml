@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Leviathan: ASCII Station"
+description = "A first-person ASCII sci-fi station game with grid-mapped levels, human NPCs and alien enemies, collectible health and ammo, raycast combat, atmospheric lighting, and generated sound effects."
+version = "1.0.0"
+id = "artifacts/ascii-station"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25752
+
+[services.development]
+run = "pnpm --filter @workspace/ascii-station run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/ascii-station", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/ascii-station/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25752"
+BASE_PATH = "/"
